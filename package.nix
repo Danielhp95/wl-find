@@ -76,9 +76,16 @@ let
   });
 
   # wl-find hands wl-kbptr its targets, so it never detects them with OpenCV.
+  # Without it wl-kbptr refuses a config with source=detect, the setting for
+  # using it on its own, before reading the source=stdin wl-find passes.
   wl-kbptr' = wl-kbptr.overrideAttrs (old: {
     buildInputs = lib.remove opencv old.buildInputs;
     mesonFlags = [ "-Dopencv=disabled" ];
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace src/config.c --replace-fail \
+        "LOG_ERR(\"Binary not build with OpenCV. 'detect' source not supported.\");" \
+        "*out = FLOATING_MODE_SOURCE_STDIN; return 0;"
+    '';
   });
 
   # wl-find reads English only: the other languages are ~1 GiB.
