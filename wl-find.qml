@@ -4,7 +4,8 @@
 // typed pattern, a Neovim regular expression under \v (vim-regex.js), is cut
 // out of the dim and outlined. Enter leaves the matches for
 // wl-find.nu to click, or, where there are no hints to pick one of several
-// with, waits for a query with one match; Esc, a click anywhere, or Enter on
+// with, waits for a query with one match; Ctrl+Enter does the same with a
+// right click. Esc, a click anywhere, or Enter on
 // an empty bar leave none. Ctrl+H shows and hides a cheat sheet of the patterns.
 // The @…@ colours, font and tools come from package.nix.
 import QtQuick
@@ -30,6 +31,8 @@ ShellRoot {
     property bool reading: true
     // Enter came before the OCR was done: submit once it is.
     property bool submitted: false
+    // Ctrl+Enter: the click wl-find.nu makes is a right one.
+    property bool rightClick: false
     // Whether wl-find.nu can show hints to pick one of several matches.
     property bool hints: true
     // Enter on several matches with no hints: "type more" until the query
@@ -113,7 +116,8 @@ ShellRoot {
         return { x: x, y: y, w: right - x, h: bottom - y };
     }
 
-    function submit() {
+    function submit(right) {
+        rightClick = !!right;
         if (input.text.trim() === "") {
             close([]);
         } else if (reading) {
@@ -133,7 +137,7 @@ ShellRoot {
         reader.running = false;
         Quickshell.execDetached([
             "@sh@", "-c", '@coreutils@/sleep 0.03 && printf %s "$1" > "$2.part" && @coreutils@/mv "$2.part" "$2"',
-            "sh", JSON.stringify(boxes), resultPath
+            "sh", JSON.stringify({ boxes: boxes, right: rightClick }), resultPath
         ]);
     }
 
@@ -152,6 +156,7 @@ ShellRoot {
         captured = false;
         reading = true;
         submitted = false;
+        rightClick = false;
         root.hints = hints;
         narrow = false;
         resultPath = result;
@@ -165,7 +170,7 @@ ShellRoot {
         input.forceActiveFocus();
     }
 
-    onReadingChanged: if (active && submitted) submit()
+    onReadingChanged: if (active && submitted) submit(rightClick)
 
     // wl-find.nu opens a find with a line down this socket, named for this
     // file's directory, one per build: screen, hints, lines and result, between tabs. Not `qs ipc`: that
@@ -331,8 +336,8 @@ ShellRoot {
                             }
                         }
                         Keys.onEscapePressed: root.close([])
-                        Keys.onReturnPressed: root.submit()
-                        Keys.onEnterPressed: root.submit()
+                        Keys.onReturnPressed: event => root.submit(event.modifiers & Qt.ControlModifier)
+                        Keys.onEnterPressed: event => root.submit(event.modifiers & Qt.ControlModifier)
                         onTextChanged: root.narrow = false
                     }
 
@@ -433,6 +438,10 @@ ShellRoot {
                         { title: "Modes", rows: [
                             ["\\c \\C", "ignore case, match case"],
                             ["\\V", "the rest is literal"]
+                        ] },
+                        { title: "Keys", rows: [
+                            ["Enter", "click the match"],
+                            ["Ctrl+Enter", "right click the match"]
                         ] }
                     ]
 

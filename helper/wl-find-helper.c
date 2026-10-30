@@ -7,8 +7,9 @@
 //     pointer ("pointer"), which wl-kbptr's hints need too. With no NAME, the
 //     output a new layer surface goes on: the focused one.
 //
-//   wl-find-helper click NAME X Y
-//     Clicks the left button at (X, Y), in logical pixels within output NAME:
+//   wl-find-helper click NAME X Y [left|right]
+//     Clicks a button, the left one by default, at (X, Y), in logical pixels
+//     within output NAME:
 //     with a virtual pointer (Hyprland, sway, niri), or else through the
 //     RemoteDesktop portal and libei (COSMIC). The portal asks once; the
 //     token that spares asking again is kept in $XDG_STATE_HOME/wl-find.
@@ -480,7 +481,7 @@ static void untransform(int32_t transform, double *x, double *y, double *w, doub
 // A click with a virtual pointer. Bound to the output (v2), an absolute
 // motion spans the output; unbound (v1), it spans the whole layout. The
 // extent is in 1/256 pixels, so the pointer lands between pixels too.
-static void click_virtual_pointer(const struct output *out, double x, double y) {
+static void click_virtual_pointer(const struct output *out, double x, double y, uint32_t button) {
     if (!wl.seat) die("the compositor has no seat");
     struct zwlr_virtual_pointer_v1 *pointer;
     int32_t left = out->x, top = out->y, right = out->x + out->width, bottom = out->y + out->height;
@@ -510,9 +511,9 @@ static void click_virtual_pointer(const struct output *out, double x, double y) 
                                             (uint32_t)(right - left) * 256,
                                             (uint32_t)(bottom - top) * 256);
     zwlr_virtual_pointer_v1_frame(pointer);
-    zwlr_virtual_pointer_v1_button(pointer, time, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+    zwlr_virtual_pointer_v1_button(pointer, time, button, WL_POINTER_BUTTON_STATE_PRESSED);
     zwlr_virtual_pointer_v1_frame(pointer);
-    zwlr_virtual_pointer_v1_button(pointer, time, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+    zwlr_virtual_pointer_v1_button(pointer, time, button, WL_POINTER_BUTTON_STATE_RELEASED);
     zwlr_virtual_pointer_v1_frame(pointer);
     zwlr_virtual_pointer_v1_destroy(pointer);
     wl_display_roundtrip(wl.display);
@@ -521,7 +522,7 @@ static void click_virtual_pointer(const struct output *out, double x, double y) 
 // A click through libei, at (x, y) in global logical pixels: COSMIC's
 // absolute pointer has a region per output, at the output's place in the
 // layout.
-static void click_ei(int fd, double x, double y) {
+static void click_ei(int fd, double x, double y, uint32_t button) {
     struct ei *ei = ei_new_sender(NULL);
     ei_configure_name(ei, "wl-find");
     if (ei_setup_backend_fd(ei, fd) != 0) die("cannot set up libei");
@@ -548,9 +549,9 @@ static void click_ei(int fd, double x, double y) {
                 ei_device_start_emulating(device, ++sequence);
                 ei_device_pointer_motion_absolute(device, x, y);
                 ei_device_frame(device, ei_now(ei));
-                ei_device_button_button(device, BTN_LEFT, true);
+                ei_device_button_button(device, button, true);
                 ei_device_frame(device, ei_now(ei));
-                ei_device_button_button(device, BTN_LEFT, false);
+                ei_device_button_button(device, button, false);
                 ei_device_frame(device, ei_now(ei));
                 ei_device_stop_emulating(device);
                 sent = true;
@@ -603,7 +604,7 @@ static void portal_created(GObject *source, GAsyncResult *result, gpointer data)
         g_main_loop_quit(pc->loop);
 }
 
-static void click_portal(const struct output *out, double x, double y) {
+static void click_portal(const struct output *out, double x, double y, uint32_t button) {
     struct portal_click pc = {
         .loop = g_main_loop_new(NULL, FALSE),
         .token_path = g_build_filename(g_get_user_state_dir(), "wl-find", "remote-desktop-token", NULL),
@@ -621,7 +622,7 @@ static void click_portal(const struct output *out, double x, double y) {
                 pc.error ? pc.error->message : "refused");
         exit(1);
     }
-    click_ei(pc.fd, out->x + x, out->y + y);
+    click_ei(pc.fd, out->x + x, out->y + y, button);
     xdp_session_close(pc.session);
     g_object_unref(pc.session);
     g_object_unref(portal);
@@ -656,12 +657,12 @@ static int send_line(const char *path, const char *line) {
 
 int main(int argc, char **argv) {
     bool output = argc >= 2 && argc <= 3 && strcmp(argv[1], "output") == 0;
-    bool click = argc == 5 && strcmp(argv[1], "click") == 0;
+    bool click = (argc == 5 || argc == 6) && strcmp(argv[1], "click") == 0;
     bool send = argc == 4 && strcmp(argv[1], "send") == 0;
     bool hide = argc >= 4 && strcmp(argv[1], "hide-cursor") == 0;
     if (!output && !click && !send && !hide) {
         fprintf(stderr, "usage: wl-find-helper output [NAME]\n"
-                        "       wl-find-helper click NAME X Y\n"
+                        "       wl-find-helper click NAME X Y [left|right]\n"
                         "       wl-find-helper hide-cursor NAME COMMAND...\n"
                         "       wl-find-helper send SOCKET LINE\n");
         return 2;
@@ -683,9 +684,14 @@ int main(int argc, char **argv) {
     char *end_x, *end_y;
     double x = strtod(argv[3], &end_x), y = strtod(argv[4], &end_y);
     if (*end_x || *end_y) die("X and Y must be numbers");
+    uint32_t button = BTN_LEFT;
+    if (argc == 6) {
+        if (strcmp(argv[5], "right") == 0) button = BTN_RIGHT;
+        else if (strcmp(argv[5], "left") != 0) die("the button must be left or right");
+    }
     if (wl.pointer_manager)
-        click_virtual_pointer(out, x, y);
+        click_virtual_pointer(out, x, y, button);
     else
-        click_portal(out, x, y);
+        click_portal(out, x, y, button);
     return 0;
 }

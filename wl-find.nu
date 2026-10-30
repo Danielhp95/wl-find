@@ -3,7 +3,8 @@
 # output once it is captured, and outlines each match as it is typed; tesseract
 # reads the screen meanwhile. On Enter a lone match is clicked at once; several
 # get wl-kbptr's hints, where the compositor has the virtual pointer they click
-# with (not COSMIC: there the bar waits for a query with one match).
+# with (not COSMIC: there the bar waits for a query with one match). Ctrl+Enter
+# makes that a right click.
 # wl-find-helper finds the output and clicks, the same way on any compositor.
 # The query is a Neovim regular expression under \v (vim-regex.js).
 
@@ -56,14 +57,16 @@ def main [--output: string] {
     # Stop whatever still reads: the bar may have left before it was done.
     job list | each {|j| job kill $j.id } | ignore
     # Logical pixels, relative to the output.
-    let boxes = if ($result | path exists) { open --raw $result | from json } else { [] }
+    let answer = if ($result | path exists) { open --raw $result | from json } else { { boxes: [], right: false } }
     rm -r $dir
+    let boxes = $answer.boxes
+    let button = if $answer.right { "right" } else { "left" }
 
     match ($boxes | length) {
         0 => { }
         1 => {
             let b = $boxes.0
-            ^wl-find-helper click $output.name ($b.x + $b.w / 2) ($b.y + $b.h / 2)
+            ^wl-find-helper click $output.name ($b.x + $b.w / 2) ($b.y + $b.h / 2) $button
         }
         _ => {
             # Top to bottom: the strips come in whatever order tesseract
@@ -73,7 +76,7 @@ def main [--output: string] {
                 let y = $b.y | math floor
                 $"(($b.x + $b.w | math ceil) - $x)x(($b.y + $b.h | math ceil) - $y)+($x)+($y)"
             } | str join "\n"
-            | wl-kbptr --output $output.name -o modes=floating,click -o mode_floating.source=stdin
+            | wl-kbptr --output $output.name -o modes=floating,click -o mode_floating.source=stdin -o $"mode_click.button=($button)"
         }
     }
 }

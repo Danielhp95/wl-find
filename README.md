@@ -8,6 +8,8 @@ outlined. Press Enter to act on them:
 - several get [wl-kbptr](https://github.com/moverest/wl-kbptr) hints, so you
   pick one by its letters.
 
+Ctrl+Enter does the same with a right click.
+
 Esc, a click elsewhere, or Enter on an empty bar closes it. Ctrl+H shows or
 hides a cheat sheet of the patterns.
 
