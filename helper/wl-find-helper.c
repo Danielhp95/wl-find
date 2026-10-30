@@ -47,6 +47,9 @@
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 
+// How long the veil outlasts its command: enough for the bar's dim to map.
+#define VEIL_LINGER_MS 300
+
 struct output {
     struct wl_output *wl;
     struct zxdg_output_v1 *xdg;
@@ -381,10 +384,10 @@ static void commit_and_wait_for_frame(struct wl_surface *surface) {
 // So a clear overlay covers the output, and when the pointer enters it, it
 // sets no cursor. By the time the veil has been drawn the pointer has entered
 // it, if it is on this output at all, and one frame more takes the pointer
-// off the screen. The veil lasts as long as this process. A compositor short
-// of any of this only costs the pointer being seen.
-static void hide_pointer(const struct output *out) {
-    if (!wl.layer_shell || !wl.shm || !wl.viewporter || !wl.pointer) return;
+// off the screen. A compositor short of any of this only costs the pointer
+// being seen. Gives the veil's surface, or NULL.
+static struct wl_surface *hide_pointer(const struct output *out) {
+    if (!wl.layer_shell || !wl.shm || !wl.viewporter || !wl.pointer) return NULL;
     wl_pointer_add_listener(wl.pointer, &pointer_listener, NULL);
     struct wl_surface *surface = wl_compositor_create_surface(wl.compositor);
     struct zwlr_layer_surface_v1 *layer = zwlr_layer_shell_v1_get_layer_surface(
@@ -395,13 +398,33 @@ static void hide_pointer(const struct output *out) {
                    ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
     zwlr_layer_surface_v1_set_exclusive_zone(layer, -1);
     wl_surface_commit(surface);
-    if (!dispatch_until(&wl.configured, 100) || wl.closed) return;
+    if (!dispatch_until(&wl.configured, 100) || wl.closed) return NULL;
     zwlr_layer_surface_v1_ack_configure(layer, wl.configure_serial);
     wp_viewport_set_destination(wp_viewporter_get_viewport(wl.viewporter, surface),
                                 (int32_t)wl.configure_width, (int32_t)wl.configure_height);
     wl_surface_attach(surface, clear_pixel(), 0, 0);
     commit_and_wait_for_frame(surface);
     if (wl.pointer_hidden) commit_and_wait_for_frame(surface);
+    return surface;
+}
+
+// Hyprland refocuses when a surface that has the pointer goes away, and that
+// can take the keyboard from the bar. So the veil lets the pointer through
+// now, for the dim to take as it maps, and goes only after that: in a child,
+// as wl-find waits for this process to read the capture.
+static void leave_pointer(struct wl_surface *veil) {
+    struct wl_region *nothing = wl_compositor_create_region(wl.compositor);
+    wl_surface_set_input_region(veil, nothing);
+    wl_region_destroy(nothing);
+    wl_surface_commit(veil);
+    wl_display_flush(wl.display);
+    if (fork() == 0) {
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+        poll(NULL, 0, VEIL_LINGER_MS);
+        _exit(0);
+    }
 }
 
 static int run(char **command) {
@@ -652,8 +675,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (hide) {
-        hide_pointer(out);
-        return run(argv + 3);
+        struct wl_surface *veil = hide_pointer(out);
+        int status = run(argv + 3);
+        if (veil) leave_pointer(veil);
+        return status;
     }
     char *end_x, *end_y;
     double x = strtod(argv[3], &end_x), y = strtod(argv[4], &end_y);
