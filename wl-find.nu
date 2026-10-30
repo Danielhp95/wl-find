@@ -20,6 +20,8 @@ const OVERLAP = 32
 # inverted wherever it is dark on average over BLOCK logical pixels: dark text
 # on a light ground throughout.
 const BLOCK = 24
+# open-bar's attempts, 20 ms each, for wl-find-bar.service to answer.
+const ANSWER_WAIT = 25
 
 # --output: the output to search, by name; by default the focused one.
 def main [--output: string] {
@@ -36,7 +38,8 @@ def main [--output: string] {
     let bar = open-bar $output.name $output.pointer $lines $result
     if $bar == null {
         rm -r $dir
-        return
+        print -e "wl-find: the find bar did not start"
+        exit 1
     }
     job spawn {
         try {
@@ -79,14 +82,21 @@ def main [--output: string] {
 # matches; the bar's pid, or null if no bar answers. The bar stays loaded
 # between finds: wl-find-bar.service's where there is one, or else the one the
 # first find starts here. One not running yet is started, and waited for while
-# it loads. It takes finds on a socket named for its directory (wl-find.qml).
+# it loads. It takes finds on a socket named for its directory (wl-find.qml), so
+# a service of another build (`nix run` beside an installed wl-find) starts fine
+# and never answers: past ANSWER_WAIT attempts this build starts a bar of its
+# own. --no-duplicate leaves one of this build that is still loading alone.
 def open-bar [screen: string, hints: bool, lines: string, result: string] {
     let socket = $"($env.XDG_RUNTIME_DIR)/wl-find-($env.WL_FIND_QML | path dirname | path basename).sock"
     let line = [$screen $hints $lines $result] | str join "\t"
+    mut own_at = $ANSWER_WAIT
     for attempt in 0..<150 {
         let sent = ^wl-find-helper send $socket $line | complete
         if $sent.exit_code == 0 { return ($sent.stdout | str trim | into int) }
         if $attempt == 0 and (^systemctl --user start wl-find-bar.service | complete).exit_code != 0 {
+            $own_at = 0
+        }
+        if $attempt == $own_at {
             ^qs --path $env.WL_FIND_QML --daemonize --no-duplicate out+err> /dev/null
         }
         sleep 20ms

@@ -160,14 +160,7 @@ ShellRoot {
         const output = screenNamed(screen);
         dim.screen = output;
         cheatsheet.screen = output;
-        // On another output the bar is a new surface, which keeps the layer
-        // it is made on: hidden while it moves, it is made raised.
-        if (bar.screen !== output) {
-            bar.visible = false;
-            bar.screen = output;
-            active = true;
-            bar.visible = true;
-        }
+        bar.screen = output;
         active = true;
         input.forceActiveFocus();
     }
@@ -278,30 +271,24 @@ ShellRoot {
         }
     }
 
-    // The bar, up before the screen is captured (barRect). It stays mapped
-    // between finds, parked: on the background layer, clear, and letting
-    // clicks through, so a find only raises it. A new surface would take
-    // ~40 ms to set up and draw first; one on another output still does.
+    // The bar, up before the screen is captured (barRect). Its window comes
+    // and goes with each find: left mapped behind opaque windows between finds,
+    // it would get no frame callbacks, and Qt would never commit the next raise.
     PanelWindow {
         id: bar
+        visible: root.active
         anchors.bottom: true
         margins.bottom: 72
         implicitWidth: 560
         implicitHeight: 52
         exclusionMode: ExclusionMode.Ignore
         color: "transparent"
-        WlrLayershell.layer: root.active ? WlrLayer.Overlay : WlrLayer.Background
-        WlrLayershell.keyboardFocus: root.active ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         WlrLayershell.namespace: "wl-find-bar"
-        mask: root.active ? null : parked
-
-        Region {
-            id: parked
-        }
 
         Rectangle {
             id: barBox
-            visible: root.active
             anchors.fill: parent
             radius: 14
             color: "@bg@"

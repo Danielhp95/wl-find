@@ -47,8 +47,8 @@ strips already read, so the first ones appear about half a second after the
 key press.
 
 The bar is a [Quickshell](https://quickshell.org) config that stays loaded
-between finds. It is opened through a socket, so it is up about 70 ms after
-the key press on an output it was last used on, and about 0.25 s on another.
+between finds. It is opened through a socket, so it is up about 0.1 s after the
+key press.
 
 ## Try it
 
