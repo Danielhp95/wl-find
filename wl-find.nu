@@ -5,6 +5,7 @@
 # get wl-kbptr's hints, where the compositor has the virtual pointer they click
 # with (not COSMIC: there the bar waits for a query with one match).
 # wl-find-helper finds the output and clicks, the same way on any compositor.
+# The query is a Neovim regular expression under \v (vim-regex.js).
 
 # tesseract takes over two seconds on the whole 3840x2400 panel, so the capture
 # is read in horizontal strips, in parallel. Strips overlap by OVERLAP logical
@@ -78,9 +79,9 @@ def main [--output: string] {
 # matches; the bar's pid, or null if no bar answers. The bar stays loaded
 # between finds: wl-find-bar.service's where there is one, or else the one the
 # first find starts here. One not running yet is started, and waited for while
-# it loads. It takes finds on a socket named for its file (wl-find.qml).
+# it loads. It takes finds on a socket named for its directory (wl-find.qml).
 def open-bar [screen: string, hints: bool, lines: string, result: string] {
-    let socket = $"($env.XDG_RUNTIME_DIR)/wl-find-($env.WL_FIND_QML | path basename).sock"
+    let socket = $"($env.XDG_RUNTIME_DIR)/wl-find-($env.WL_FIND_QML | path dirname | path basename).sock"
     let line = [$screen $hints $lines $result] | str join "\t"
     for attempt in 0..<150 {
         let sent = ^wl-find-helper send $socket $line | complete
@@ -99,11 +100,12 @@ def open-bar [screen: string, hints: bool, lines: string, result: string] {
 # tesseract through pipes in $dir.
 def read-lines [name: string, scale: number, dir: string] {
     # The capture first, the longest wait before the first word; it mails
-    # the image back here (null if grim failed). `complete`, not `try`: try
+    # the image back here (null if grim failed). The pointer is hidden for it,
+    # or it may lie across the very word sought. `complete`, not `try`: try
     # stalls on an external's output past the pipe's 64 KiB.
     let me = job id
     job spawn {
-        let capture = ^grim -o $name -t ppm - | complete
+        let capture = ^wl-find-helper hide-cursor $name grim -o $name -t ppm - | complete
         (if $capture.exit_code == 0 { $capture.stdout | into binary }) | job send --tag 1 $me
     }
     # A tesseract for each strip, started meanwhile so its models load; each

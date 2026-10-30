@@ -28,6 +28,19 @@
           nu -n -c 'if not (nu-check ${./wl-find.nu}) { nu-check --debug ${./wl-find.nu} }'
           touch $out
         '';
+        # The bar's regular expressions against Neovim's own.
+        regex =
+          pkgs.runCommand "wl-find-regex-check"
+            {
+              nativeBuildInputs = [
+                pkgs.nodejs
+                pkgs.neovim-unwrapped
+              ];
+            }
+            ''
+              HOME=$TMPDIR node ${./.}/test/vim-regex.js
+              touch $out
+            '';
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

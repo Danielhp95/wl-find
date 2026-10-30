@@ -1,17 +1,42 @@
 # wl-find
 
 Ctrl+F for the whole screen, on Wayland. Press a key and a find bar comes up.
-As you type, each match on the focused output is outlined. Press Enter to act
-on them:
+As you type a [pattern](#patterns), each match on the focused output is
+outlined. Press Enter to act on them:
 
 - a single match is clicked;
 - several get [wl-kbptr](https://github.com/moverest/wl-kbptr) hints, so you
   pick one by its letters.
 
-Esc, a click elsewhere, or Enter on an empty bar closes it.
+Esc, a click elsewhere, or Enter on an empty bar closes it. Ctrl+H shows or
+hides a cheat sheet of the patterns.
 
 It works on Hyprland, sway, niri and COSMIC, and on other compositors with
 the same Wayland protocols (see [Requirements](#requirements)).
+
+## Patterns
+
+What you type is a Neovim regular expression under `\v` (very magic, see
+`:help /\v`), so `(foo|bar)+` needs no backslashes and a literal `(` is `\(`.
+All of `:help pattern` that makes sense on one line of text works: lazy repeats
+(`{-}`), `<` and `>`, lookaround (`@=`, `@!`, `@<=`, `@<!`, `@>`), `\zs` and `\ze`,
+`%[]`, `&`, back references, and `\m`, `\M` and `\V` to change the magic level.
+Start with `\V` to search for text literally. What needs a buffer or a cursor
+(`%V`, `%#`, `%'m`, `%23l`, `%23c`, `%23v`) and `~` are refused.
+
+Case works as with `'ignorecase'` and `'smartcase'`: `save` also finds `Save`,
+but `Save` does not find `save`. `\c` and `\C` override that.
+
+A match can span words on a line, which are searched joined by single spaces.
+It cannot span lines. `bad pattern` in the bar means the text is not a pattern
+yet, as `(foo` is on the way to `(foo)`, or that it backtracks too much to finish.
+
+The bar has its own matcher, `vim-regex.js`, as QML's RegExp has no lookbehind.
+`test/vim-regex.js` checks it against Neovim, pattern by pattern:
+
+```sh
+node test/vim-regex.js   # needs nvim on PATH
+```
 
 ## How it works
 
@@ -110,8 +135,8 @@ wl-kbptr's `unselectable_bg_color`, set `dim` to match it.
 
 ## Animations
 
-The bar and the dim are layer surfaces, with namespaces `wl-find-bar` and
-`wl-find`. If your compositor animates layers, they fade in and out. On
+The bar, the dim and the cheat sheet are layer surfaces, with namespaces
+`wl-find-bar`, `wl-find` and `wl-find-cheatsheet`. If your compositor animates layers, they fade in and out. On
 Hyprland, this rule shows and hides them at once:
 
 ```lua
@@ -125,10 +150,16 @@ wl-find uses no compositor's IPC, only these Wayland protocols:
 - layer-shell, for the bar and the dim;
 - xdg-output, to find each output's place and size;
 - wlr-screencopy or ext-image-copy-capture, for grim;
+- viewporter, to hide the pointer while grim captures: a compositor that draws
+  the pointer in software draws it into captures too;
 - wlr-virtual-pointer, to click and for wl-kbptr's hints. Without it, the
   RemoteDesktop portal clicks instead, through libei.
 
 GNOME has no layer-shell, so wl-find cannot run there.
+
+The package ships tesseract's `eng` model only, and a Quickshell built with
+just the features the bar uses, so its closure is about 840 MiB rather than
+2.4 GiB. Most of what is left is Qt.
 
 Text is read with tesseract's `eng` model. Small text on a scale-1 output is
 read less reliably than on a HiDPI one.

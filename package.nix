@@ -8,6 +8,7 @@
   writeShellScriptBin,
   symlinkJoin,
   replaceVars,
+  runCommandLocal,
   runtimeShell,
   meson,
   ninja,
@@ -20,15 +21,70 @@
   libei,
   coreutils,
   quickshell,
+  cpptrace,
+  libdrm,
+  libgbm,
+  libxcb,
+  pam,
+  pipewire,
+  polkit,
+  glib,
   grim,
-  imagemagick,
+  imagemagick_light,
   tesseract5,
   wl-kbptr,
+  opencv,
   colors ? { },
   font ? "monospace",
 }:
 let
-  bar = replaceVars ./wl-find.qml (
+  # Only what the bar uses of Quickshell: the rest (PipeWire and through it
+  # GStreamer and Python, Bluetooth, PAM, polkit...) is ~400 MiB. Qt stays
+  # the stock one, which is in the binary cache.
+  quickshell' = quickshell.overrideAttrs (old: {
+    buildInputs = lib.subtractLists [
+      cpptrace
+      libdrm
+      libgbm
+      libxcb
+      pam
+      pipewire
+      polkit
+      glib
+    ] old.buildInputs;
+    cmakeFlags =
+      old.cmakeFlags
+      ++ map (feature: lib.cmakeBool feature false) [
+        "CRASH_HANDLER"
+        "X11"
+        "I3"
+        "HYPRLAND"
+        "SCREENCOPY"
+        "WAYLAND_SESSION_LOCK"
+        "WAYLAND_TOPLEVEL_MANAGEMENT"
+        "SERVICE_STATUS_NOTIFIER"
+        "SERVICE_PIPEWIRE"
+        "SERVICE_MPRIS"
+        "SERVICE_PAM"
+        "SERVICE_POLKIT"
+        "SERVICE_GREETD"
+        "SERVICE_UPOWER"
+        "SERVICE_NOTIFICATIONS"
+        "BLUETOOTH"
+        "NETWORK"
+      ];
+  });
+
+  # wl-find hands wl-kbptr its targets, so it never detects them with OpenCV.
+  wl-kbptr' = wl-kbptr.overrideAttrs (old: {
+    buildInputs = lib.remove opencv old.buildInputs;
+    mesonFlags = [ "-Dopencv=disabled" ];
+  });
+
+  # wl-find reads English only: the other languages are ~1 GiB.
+  tesseract = tesseract5.override { enableLanguages = [ "eng" ]; };
+
+  qml = replaceVars ./wl-find.qml (
     {
       # wl-kbptr's own dim (mode_floating.unselectable_bg_color), so its
       # hints take over without a change of shade. Set it to yours if you
@@ -50,6 +106,13 @@ let
       coreutils = "${coreutils}/bin";
     }
   );
+
+  # A directory, as the QML imports the JS beside it.
+  bar = runCommandLocal "wl-find-bar-qml" { } ''
+    mkdir $out
+    cp ${qml} $out/wl-find.qml
+    cp ${./vim-regex.js} $out/vim-regex.js
+  '';
 
   # Finds the focused output and clicks, the same way on every compositor
   # (helper/wl-find-helper.c).
@@ -77,26 +140,26 @@ let
     makeWrapperArgs = [
       "--set"
       "WL_FIND_QML"
-      bar
+      "${bar}/wl-find.qml"
       "--prefix"
       "PATH"
       ":"
       (lib.makeBinPath [
         coreutils
         helper
-        quickshell
+        quickshell'
         grim
-        imagemagick # the dark-on-light pass before tesseract
-        tesseract5
-        wl-kbptr
+        imagemagick_light # the dark-on-light pass before tesseract
+        tesseract
+        wl-kbptr'
       ])
     ];
   } (builtins.readFile ./wl-find.nu);
 
   # wl-find finds the bar it runs by this path (wl-find.qml's socket).
   findBar = writeShellScriptBin "wl-find-bar" ''
-    export WL_FIND_QML=${bar}
-    exec ${lib.getExe' quickshell "qs"} --path ${bar} "$@"
+    export WL_FIND_QML=${bar}/wl-find.qml
+    exec ${lib.getExe' quickshell' "qs"} --path ${bar}/wl-find.qml "$@"
   '';
 in
 symlinkJoin {

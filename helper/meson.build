@@ -9,6 +9,7 @@ scanner = find_program('wayland-scanner', native: true)
 protocols = []
 foreach xml : [
   wayland_protocols / 'stable/xdg-shell/xdg-shell.xml', # layer-shell's popups refer to it
+  wayland_protocols / 'stable/viewporter/viewporter.xml',
   wayland_protocols / 'unstable/xdg-output/xdg-output-unstable-v1.xml',
   wlr_protocols / 'unstable/wlr-layer-shell-unstable-v1.xml',
   wlr_protocols / 'unstable/wlr-virtual-pointer-unstable-v1.xml',

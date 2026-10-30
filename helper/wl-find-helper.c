@@ -13,6 +13,11 @@
 //     RemoteDesktop portal and libei (COSMIC). The portal asks once; the
 //     token that spares asking again is kept in $XDG_STATE_HOME/wl-find.
 //
+//   wl-find-helper hide-cursor NAME COMMAND...
+//     Runs COMMAND with the pointer out of sight on output NAME, and exits
+//     with its status. Some compositors draw the pointer into every capture,
+//     whatever grim asks for: those drawing it in software.
+//
 //   wl-find-helper send SOCKET LINE
 //     Sends LINE to the find bar listening on SOCKET and prints the bar's
 //     pid; fails quietly if none listens.
@@ -29,6 +34,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -36,6 +42,7 @@
 #include <libportal/portal.h>
 #include <wayland-client.h>
 
+#include "viewporter-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
@@ -58,6 +65,8 @@ static struct {
     struct wl_compositor *compositor;
     struct wl_shm *shm;
     struct wl_seat *seat;
+    struct wl_pointer *pointer;
+    struct wp_viewporter *viewporter;
     struct zwlr_layer_shell_v1 *layer_shell;
     struct zxdg_output_manager_v1 *xdg_output_manager;
     struct zwlr_virtual_pointer_manager_v1 *pointer_manager;
@@ -65,8 +74,10 @@ static struct {
     struct output *outputs;
     // The probe's progress.
     bool configured, closed, has_entered;
-    uint32_t configure_serial;
+    uint32_t configure_serial, configure_width, configure_height;
     struct output *entered;
+    // The veil's progress.
+    bool frame_done, pointer_hidden;
 } wl;
 
 static void die(const char *message) {
@@ -152,6 +163,18 @@ static uint32_t min_version(uint32_t offered, uint32_t wanted) {
     return offered < wanted ? offered : wanted;
 }
 
+static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities) {
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !wl.pointer)
+        wl.pointer = wl_seat_get_pointer(seat);
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name) {}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
+};
+
 static void registry_global(void *data, struct wl_registry *registry, uint32_t id,
                             const char *interface, uint32_t version) {
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
@@ -160,6 +183,9 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t i
         wl.shm = wl_registry_bind(registry, id, &wl_shm_interface, 1);
     } else if (strcmp(interface, wl_seat_interface.name) == 0 && !wl.seat) {
         wl.seat = wl_registry_bind(registry, id, &wl_seat_interface, 1);
+        wl_seat_add_listener(wl.seat, &seat_listener, NULL);
+    } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+        wl.viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         wl.layer_shell = wl_registry_bind(registry, id, &zwlr_layer_shell_v1_interface,
                                           min_version(version, 2));
@@ -249,6 +275,8 @@ static const struct wl_surface_listener surface_listener = {
 static void layer_configure(void *data, struct zwlr_layer_surface_v1 *layer, uint32_t serial,
                             uint32_t width, uint32_t height) {
     wl.configure_serial = serial;
+    wl.configure_width = width;
+    wl.configure_height = height;
     wl.configured = true;
 }
 
@@ -305,6 +333,88 @@ static struct output *focused_output(void) {
     wl_display_flush(wl.display);
     if (!wl.entered) die("the probe entered no output");
     return wl.entered;
+}
+
+static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
+                          struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y) {
+    wl_pointer_set_cursor(pointer, serial, NULL, 0, 0);
+    wl.pointer_hidden = true;
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
+                          struct wl_surface *surface) {}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t x,
+                           wl_fixed_t y) {}
+
+static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time,
+                           uint32_t button, uint32_t state) {}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
+                         wl_fixed_t value) {}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+};
+
+static void frame_done(void *data, struct wl_callback *callback, uint32_t time) {
+    wl_callback_destroy(callback);
+    wl.frame_done = true;
+}
+
+static const struct wl_callback_listener frame_listener = {.done = frame_done};
+
+// Commits and waits for the compositor to have drawn that commit.
+static void commit_and_wait_for_frame(struct wl_surface *surface) {
+    wl.frame_done = false;
+    wl_callback_add_listener(wl_surface_frame(surface), &frame_listener, NULL);
+    wl_surface_damage(surface, 0, 0, 1, 1);
+    wl_surface_commit(surface);
+    dispatch_until(&wl.frame_done, 100);
+}
+
+// Only a surface can hide the pointer, and only while the pointer is over it.
+// So a clear overlay covers the output, and when the pointer enters it, it
+// sets no cursor. By the time the veil has been drawn the pointer has entered
+// it, if it is on this output at all, and one frame more takes the pointer
+// off the screen. The veil lasts as long as this process. A compositor short
+// of any of this only costs the pointer being seen.
+static void hide_pointer(const struct output *out) {
+    if (!wl.layer_shell || !wl.shm || !wl.viewporter || !wl.pointer) return;
+    wl_pointer_add_listener(wl.pointer, &pointer_listener, NULL);
+    struct wl_surface *surface = wl_compositor_create_surface(wl.compositor);
+    struct zwlr_layer_surface_v1 *layer = zwlr_layer_shell_v1_get_layer_surface(
+        wl.layer_shell, surface, out->wl, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "wl-find-veil");
+    zwlr_layer_surface_v1_add_listener(layer, &layer_listener, NULL);
+    zwlr_layer_surface_v1_set_anchor(
+        layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+                   ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+    zwlr_layer_surface_v1_set_exclusive_zone(layer, -1);
+    wl_surface_commit(surface);
+    if (!dispatch_until(&wl.configured, 100) || wl.closed) return;
+    zwlr_layer_surface_v1_ack_configure(layer, wl.configure_serial);
+    wp_viewport_set_destination(wp_viewporter_get_viewport(wl.viewporter, surface),
+                                (int32_t)wl.configure_width, (int32_t)wl.configure_height);
+    wl_surface_attach(surface, clear_pixel(), 0, 0);
+    commit_and_wait_for_frame(surface);
+    if (wl.pointer_hidden) commit_and_wait_for_frame(surface);
+}
+
+static int run(char **command) {
+    pid_t child = fork();
+    if (child < 0) die("cannot fork");
+    if (child == 0) {
+        execvp(command[0], command);
+        _exit(127);
+    }
+    int status;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR) die("cannot wait for the command");
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
 static void print_output(const struct output *out) {
@@ -525,9 +635,11 @@ int main(int argc, char **argv) {
     bool output = argc >= 2 && argc <= 3 && strcmp(argv[1], "output") == 0;
     bool click = argc == 5 && strcmp(argv[1], "click") == 0;
     bool send = argc == 4 && strcmp(argv[1], "send") == 0;
-    if (!output && !click && !send) {
+    bool hide = argc >= 4 && strcmp(argv[1], "hide-cursor") == 0;
+    if (!output && !click && !send && !hide) {
         fprintf(stderr, "usage: wl-find-helper output [NAME]\n"
                         "       wl-find-helper click NAME X Y\n"
+                        "       wl-find-helper hide-cursor NAME COMMAND...\n"
                         "       wl-find-helper send SOCKET LINE\n");
         return 2;
     }
@@ -538,6 +650,10 @@ int main(int argc, char **argv) {
     if (output) {
         print_output(out);
         return 0;
+    }
+    if (hide) {
+        hide_pointer(out);
+        return run(argv + 3);
     }
     char *end_x, *end_y;
     double x = strtod(argv[3], &end_x), y = strtod(argv[4], &end_y);
