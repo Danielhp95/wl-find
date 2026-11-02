@@ -8,7 +8,8 @@ outlined. Press Enter to act on them:
 - several get [wl-kbptr](https://github.com/moverest/wl-kbptr) hints, so you
   pick one by its letters.
 
-Ctrl+Enter does the same with a right click.
+Ctrl+Enter does the same with a right click, and Ctrl+Y copies the text of the
+match to the clipboard instead of clicking it (with hints, the one you pick).
 
 Esc, a click elsewhere, or Enter on an empty bar closes it. Ctrl+H shows or
 hides a cheat sheet of the patterns.
@@ -39,6 +40,54 @@ The bar has its own matcher, `vim-regex.js`, as QML's RegExp has no lookbehind.
 ```sh
 node test/vim-regex.js   # needs nvim on PATH
 ```
+
+## Start with a pattern
+
+`wl-find --query PATTERN` (`-q`) opens the bar with PATTERN already typed, as a
+[pattern](#patterns) like any other, and presses Enter for you as soon as the
+screen is read: one match is clicked, several get hints. If there is no match,
+the bar stays open and says so. Typing in the bar before that takes the Enter
+back, and the pattern is yours to edit.
+
+`wl-find --type TYPE` (`-t`) does the same with a preset, as kitty's
+`kitten hints --type` has. It is like `--query`, so use one or the other.
+
+Add `--copy` (`-y`) to have Ctrl+Y pressed instead of Enter: the match, or the
+one you pick of several by its hint, is copied rather than clicked, as kitty's
+hints do with `--program @`.
+
+| Type   | Matches                                                                     |
+| ------ | --------------------------------------------------------------------------- |
+| `url`  | `http`, `https`, `ftp`, `ssh`, `git`, `file`... URLs, in any case           |
+| `path` | anything with a `/` in it, or a name with an extension: `src/main.rs`, `~/.zshrc`, `Cargo.lock` |
+
+Quotes and brackets around a match are not part of it, nor is the punctuation
+that ends a sentence: `(see src/main.rs).` is `src/main.rs`. A `)` ends a URL
+only if it has no `(` to close, so `en.wikipedia.org/wiki/Foo_(bar)` is whole.
+A path with a space in it is two matches, and `path` also takes what only
+looks like one, such as `and/or`.
+
+The presets are plain patterns, at the top of `wl-find.nu`, if you want to
+adapt one: they start with `\v\c` (very magic, ignore case).
+
+```lua
+-- Hyprland, hyprland.lua
+hl.bind("SUPER + U", hl.dsp.exec_cmd("wl-find --type url"))
+hl.bind("SUPER + P", hl.dsp.exec_cmd("wl-find --type path"))
+```
+
+```lua
+-- ...to copy, not to click
+hl.bind("SUPER + SHIFT + U", hl.dsp.exec_cmd("wl-find --type url --copy"))
+```
+
+```sh
+wl-find -q 'TODO|FIXME'   # your own, to click
+wl-find -q 'TODO|FIXME' -y   # ...or to copy
+```
+
+`node test/presets.js` checks the presets against Neovim, line by line (it
+needs nvim too).
 
 ## How it works
 
@@ -111,9 +160,10 @@ RemoteDesktop portal instead. The first click asks you to allow remote
 control. Choose "Always allow" and later clicks go through without asking.
 The portal's restore token is kept in `~/.local/state/wl-find`.
 
-wl-kbptr needs the virtual pointer too, so COSMIC gets no hints. If you press
-Enter while there are several matches, the bar stays open and asks you to type
-more until one is left.
+wl-kbptr needs the virtual pointer too, so COSMIC gets no hints to click with.
+If you press Enter while there are several matches, the bar stays open and asks
+you to type more until one is left. Copying (Ctrl+Y, `--copy`) uses wl-kbptr's
+`--only-print`, which moves no pointer, so it does get hints.
 
 ## Restyle
 
@@ -155,7 +205,8 @@ wl-find uses no compositor's IPC, only these Wayland protocols:
 - viewporter, to hide the pointer while grim captures: a compositor that draws
   the pointer in software draws it into captures too;
 - wlr-virtual-pointer, to click and for wl-kbptr's hints. Without it, the
-  RemoteDesktop portal clicks instead, through libei.
+  RemoteDesktop portal clicks instead, through libei;
+- wlr-data-control or ext-data-control, for wl-copy, to copy with Ctrl+Y.
 
 GNOME has no layer-shell, so wl-find cannot run there.
 
@@ -167,5 +218,5 @@ Text is read with tesseract's `eng` model. Small text on a scale-1 output is
 read less reliably than on a HiDPI one.
 
 Everything else comes with the package: Quickshell, grim, ImageMagick,
-tesseract, wl-kbptr, and `wl-find-helper`, a small C program that finds the
+tesseract, wl-kbptr, wl-clipboard, and `wl-find-helper`, a small C program that finds the
 focused output and clicks.

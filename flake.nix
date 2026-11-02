@@ -28,7 +28,8 @@
           nu -n -c 'if not (nu-check ${./wl-find.nu}) { nu-check --debug ${./wl-find.nu} }'
           touch $out
         '';
-        # The bar's regular expressions against Neovim's own.
+        # The bar's regular expressions, and wl-find's url and path presets,
+        # against Neovim's own.
         regex =
           pkgs.runCommand "wl-find-regex-check"
             {
@@ -39,6 +40,7 @@
             }
             ''
               HOME=$TMPDIR node ${./.}/test/vim-regex.js
+              HOME=$TMPDIR node ${./.}/test/presets.js
               touch $out
             '';
       });

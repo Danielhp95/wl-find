@@ -5,8 +5,11 @@
 // out of the dim and outlined. Enter leaves the matches for
 // wl-find.nu to click, or, where there are no hints to pick one of several
 // with, waits for a query with one match; Ctrl+Enter does the same with a
-// right click. Esc, a click anywhere, or Enter on
-// an empty bar leave none. Ctrl+H shows and hides a cheat sheet of the patterns.
+// right click, and Ctrl+Y has the text of the match copied instead. Esc, a
+// click anywhere, or Enter on an empty bar leave none. wl-find --query or
+// --type types a pattern in, and Enter is pressed for you once the screen is
+// read, unless you edit it first. Ctrl+H shows and hides a cheat sheet of the
+// patterns.
 // The @…@ colours, font and tools come from package.nix.
 import QtQuick
 import QtQuick.Layouts
@@ -33,6 +36,13 @@ ShellRoot {
     property bool submitted: false
     // Ctrl+Enter: the click wl-find.nu makes is a right one.
     property bool rightClick: false
+    // Ctrl+Y: wl-find.nu copies the text of the match instead of clicking it.
+    // copyAlways is wl-find --copy: Enter does that too.
+    property bool copyText: false
+    property bool copyAlways: false
+    // The find came with a pattern: Enter is pressed once the screen is read,
+    // until the pattern is edited.
+    property bool autoSubmit: false
     // Whether wl-find.nu can show hints to pick one of several matches.
     property bool hints: true
     // Enter on several matches with no hints: "type more" until the query
@@ -88,7 +98,7 @@ ShellRoot {
                 const words = read.map(w => ({ text: fold(w.text), x: w.x, y: w.y, w: w.w, h: w.h }));
                 const text = words.map(w => w.text).join(" ");
                 for (let at = 0, match; (match = pattern.search(text, at)) !== null; ) {
-                    if (match.end > match.start) boxes.push(box(words, match));
+                    if (match.end > match.start) boxes.push(box(words, match, text));
                     at = Math.max(match.end, at + 1);
                 }
             }
@@ -98,8 +108,9 @@ ShellRoot {
         return { boxes: boxes, bad: false };
     }
 
-    // The box of a match in a line's words, given as offsets into them joined.
-    function box(words, match) {
+    // The box of a match in a line's words, given as offsets into them joined
+    // (`text`), with the text matched, as find() compares it.
+    function box(words, match, text) {
         let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
         let wordStart = 0;
         for (const w of words) {
@@ -113,16 +124,19 @@ ShellRoot {
             }
             wordStart += w.text.length + 1;
         }
-        return { x: x, y: y, w: right - x, h: bottom - y };
+        return { x: x, y: y, w: right - x, h: bottom - y, text: text.slice(match.start, match.end) };
     }
 
-    function submit(right) {
+    // Copying picks one of several matches by hints that need no pointer to
+    // click with (wl-kbptr --only-print), so it has them everywhere.
+    function submit(right, copy) {
         rightClick = !!right;
+        copyText = !!copy || copyAlways;
         if (input.text.trim() === "") {
             close([]);
         } else if (reading) {
             submitted = true;
-        } else if (matches.length === 1 || (matches.length > 1 && hints)) {
+        } else if (matches.length === 1 || (matches.length > 1 && (hints || copyText))) {
             close(matches);
         } else if (matches.length > 1) {
             narrow = true;
@@ -137,7 +151,7 @@ ShellRoot {
         reader.running = false;
         Quickshell.execDetached([
             "@sh@", "-c", '@coreutils@/sleep 0.03 && printf %s "$1" > "$2.part" && @coreutils@/mv "$2.part" "$2"',
-            "sh", JSON.stringify({ boxes: boxes, right: rightClick }), resultPath
+            "sh", JSON.stringify({ boxes: boxes, right: rightClick, copy: copyText }), resultPath
         ]);
     }
 
@@ -148,19 +162,26 @@ ShellRoot {
     }
 
     // A find on output `screen`, with or without `hints`: the lines come from
-    // the pipe at `lines`, the boxes chosen go to `result`. One still open is
+    // the pipe at `lines`, the boxes chosen go to `result`, and `query` is
+    // typed in already, and submitted once the screen is read. With `copy`,
+    // the text of the match is copied rather than clicked. One still open is
     // closed with none.
-    function open(screen, hints, lines, result) {
+    function open(screen, hints, lines, result, query, copy) {
         if (active) close([]);
         root.lines = [];
         captured = false;
         reading = true;
         submitted = false;
         rightClick = false;
+        copyAlways = copy;
+        copyText = copy;
         root.hints = hints;
         narrow = false;
         resultPath = result;
-        input.text = "";
+        input.text = query;
+        // After the text: typing it in is not an edit.
+        autoSubmit = query.trim() !== "";
+        submitted = autoSubmit;
         reader.exec(["@coreutils@/cat", lines]);
         const output = screenNamed(screen);
         dim.screen = output;
@@ -170,11 +191,12 @@ ShellRoot {
         input.forceActiveFocus();
     }
 
-    onReadingChanged: if (active && submitted) submit(rightClick)
+    onReadingChanged: if (active && submitted) submit(rightClick, copyText)
 
     // wl-find.nu opens a find with a line down this socket, named for this
-    // file's directory, one per build: screen, hints, lines and result, between tabs. Not `qs ipc`: that
-    // is a Qt program of its own, ~60 ms to start before the bar could.
+    // file's directory, one per build: screen, hints, lines, result, the query
+    // as JSON, and copy, between tabs. Not `qs ipc`: that is a Qt program of
+    // its own, ~60 ms to start before the bar could.
     SocketServer {
         active: true
         path: Quickshell.env("XDG_RUNTIME_DIR") + "/wl-find-"
@@ -182,8 +204,8 @@ ShellRoot {
         handler: Socket {
             parser: SplitParser {
                 onRead: line => {
-                    const [screen, hints, lines, result] = line.split("\t");
-                    root.open(screen, hints === "true", lines, result);
+                    const [screen, hints, lines, result, query, copy] = line.split("\t");
+                    root.open(screen, hints === "true", lines, result, query ? JSON.parse(query) : "", copy === "true");
                 }
             }
         }
@@ -333,12 +355,24 @@ ShellRoot {
                             if (event.key === Qt.Key_H && (event.modifiers & Qt.ControlModifier)) {
                                 root.cheatsheetWanted = !root.cheatsheetWanted;
                                 event.accepted = true;
+                            } else if (event.key === Qt.Key_Y && (event.modifiers & Qt.ControlModifier)) {
+                                // Not the TextInput's own redo.
+                                root.submit(false, true);
+                                event.accepted = true;
                             }
                         }
                         Keys.onEscapePressed: root.close([])
                         Keys.onReturnPressed: event => root.submit(event.modifiers & Qt.ControlModifier)
                         Keys.onEnterPressed: event => root.submit(event.modifiers & Qt.ControlModifier)
-                        onTextChanged: root.narrow = false
+                        onTextChanged: {
+                            root.narrow = false;
+                            // Editing a pattern given on the command line is
+                            // taking it back from the Enter that was coming.
+                            if (root.autoSubmit) {
+                                root.autoSubmit = false;
+                                root.submitted = false;
+                            }
+                        }
                     }
 
                     Text {
@@ -441,7 +475,8 @@ ShellRoot {
                         ] },
                         { title: "Keys", rows: [
                             ["Enter", "click the match"],
-                            ["Ctrl+Enter", "right click the match"]
+                            ["Ctrl+Enter", "right click the match"],
+                            ["Ctrl+Y", "copy the match"]
                         ] }
                     ]
 

@@ -4,9 +4,29 @@
 # reads the screen meanwhile. On Enter a lone match is clicked at once; several
 # get wl-kbptr's hints, where the compositor has the virtual pointer they click
 # with (not COSMIC: there the bar waits for a query with one match). Ctrl+Enter
-# makes that a right click.
+# makes that a right click, and Ctrl+Y copies the text of the match instead,
+# through wl-copy, with the same hints to pick one of several (they need no
+# pointer to click with, so COSMIC has them too).
 # wl-find-helper finds the output and clicks, the same way on any compositor.
-# The query is a Neovim regular expression under \v (vim-regex.js).
+# The query is a Neovim regular expression under \v (vim-regex.js). --query
+# opens the bar with one already typed, and --type with a preset, as kitty's
+# `kitten hints --type` has: all the URLs, or all the file paths, on screen.
+# The bar then presses Enter for you once the screen is read; --copy makes
+# that Ctrl+Y.
+
+# The presets of --type, as bar queries. Each is a single line, so that
+# test/presets.js can read it from here, and holds the same as kitty's hint of
+# its name: a match is a run of non-space characters, with the punctuation
+# around it left out ("(see src/main.rs)." is src/main.rs).
+#
+# url: a scheme and "://", then characters up to a space or a quote; it ends on
+# a character that is not punctuation, or on a ")" that closes a "(" inside it,
+# as in en.wikipedia.org/wiki/Foo_(bar).
+const HINT_URL = r#'\v\c<%(https?|ftps?|sftp|ssh|git|file|gemini|gopher|irc|ircs|kitty)://%([^[:space:]<>"'`()]|\([^[:space:]<>"'`()]*\))*%([^[:space:]<>"'`().,;:!?\]}]|\([^[:space:]<>"'`()]*\))'#
+# path: from the start of a word, or after a quote, a bracket or "=", either
+# something with a "/" in it (src/main.rs, ~/.zshrc, /etc/), or a name with an
+# extension (Cargo.lock). It does not end on punctuation, nor on a "/".
+const HINT_PATH = r#'\v\c%(^|[[:space:]"'`(<{=[])@<=%([^[:space:]"'`<>(){}|,;*=[\]]*/[^[:space:]"'`<>(){}|,;*=[\]]*[^[:space:]"'`<>(){}|,;*=[\]./:!?]|[^[:space:]"'`<>(){}|,;*=[\]]*\.[[:alpha:]][[:alnum:]]*)'#
 
 # tesseract takes over two seconds on the whole 3840x2400 panel, so the capture
 # is read in horizontal strips, in parallel. Strips overlap by OVERLAP logical
@@ -24,8 +44,24 @@ const BLOCK = 24
 # open-bar's attempts, 20 ms each, for wl-find-bar.service to answer.
 const ANSWER_WAIT = 25
 
-# --output: the output to search, by name; by default the focused one.
-def main [--output: string] {
+# Type what to find on the screen, then click it. The pattern is a Neovim
+# regular expression, under \v.
+def main [
+    --output: string # the output to search, by name; by default the focused one
+    --query (-q): string # a pattern to find at once, as if typed and Enter pressed (edit it first to take that back)
+    --type (-t): string # --query with a preset pattern: url or path (not both)
+    --copy (-y) # copy the text of the match to the clipboard instead of clicking it, as Ctrl+Y does
+] {
+    let presets = { url: $HINT_URL, path: $HINT_PATH }
+    if $query != null and $type != null {
+        print -e "wl-find: use --query or --type, not both"
+        exit 1
+    }
+    if $type != null and $type not-in $presets {
+        print -e $"wl-find: no such --type: ($type); there are ($presets | columns | str join ', ')"
+        exit 1
+    }
+    let pattern = if $type != null { $presets | get $type } else { $query | default "" }
     let output = ^wl-find-helper output ...([$output] | compact) | from json
     let dir = mktemp -d -p $env.XDG_RUNTIME_DIR wl-find.XXXXXX
     let lines = $"($dir)/lines"
@@ -36,7 +72,7 @@ def main [--output: string] {
     # failed capture closes the pipe unwritten, and the bar closes.
     ^mkfifo $lines
     # The bar first: the OCR's three dozen processes would only slow it.
-    let bar = open-bar $output.name $output.pointer $lines $result
+    let bar = open-bar $output.name $output.pointer $lines $result $pattern $copy
     if $bar == null {
         rm -r $dir
         print -e "wl-find: the find bar did not start"
@@ -57,41 +93,78 @@ def main [--output: string] {
     # Stop whatever still reads: the bar may have left before it was done.
     job list | each {|j| job kill $j.id } | ignore
     # Logical pixels, relative to the output.
-    let answer = if ($result | path exists) { open --raw $result | from json } else { { boxes: [], right: false } }
+    let answer = if ($result | path exists) { open --raw $result | from json } else { { boxes: [], right: false, copy: false } }
     rm -r $dir
     let boxes = $answer.boxes
     let button = if $answer.right { "right" } else { "left" }
 
     match ($boxes | length) {
         0 => { }
+        1 if $answer.copy => { copy-text $boxes.0.text }
         1 => {
             let b = $boxes.0
             ^wl-find-helper click $output.name ($b.x + $b.w / 2) ($b.y + $b.h / 2) $button
         }
+        _ if $answer.copy => {
+            let picked = pick-box $output.name $boxes
+            if $picked != null { copy-text $picked.text }
+        }
         _ => {
-            # Top to bottom: the strips come in whatever order tesseract
-            # finishes them, and the hints should not change with it.
-            $boxes | sort-by y x | each {|b|
-                let x = $b.x | math floor
-                let y = $b.y | math floor
-                $"(($b.x + $b.w | math ceil) - $x)x(($b.y + $b.h | math ceil) - $y)+($x)+($y)"
-            } | str join "\n"
+            hint-lines $boxes
             | wl-kbptr --output $output.name -o modes=floating,click -o mode_floating.source=stdin -o $"mode_click.button=($button)"
         }
     }
 }
 
+# What the clipboard is given. wl-copy serves it from a process of its own that
+# outlives this one, so its output goes to /dev/null, or whatever waits for
+# this script would wait for it too.
+def copy-text [text: string] {
+    $text | ^wl-copy --type text/plain out+err> /dev/null
+}
+
+# The boxes as wl-kbptr takes its targets, WxH+X+Y, top to bottom: the strips
+# come in whatever order tesseract finishes them, and the hints should not
+# change with it.
+def hint-lines [boxes: list] {
+    $boxes | sort-by y x | each {|b|
+        let x = $b.x | math floor
+        let y = $b.y | math floor
+        $"(($b.x + $b.w | math ceil) - $x)x(($b.y + $b.h | math ceil) - $y)+($x)+($y)"
+    } | str join "\n"
+}
+
+# The box that wl-kbptr's hints pick, or null if none is: --only-print leaves
+# the pointer alone and prints the area chosen, "WxH+X+Y +X+Y b", the output's
+# place and the button, in the output's own pixels, as the targets are. The
+# nearest box to it is the one, whatever the rounding.
+def pick-box [name: string, boxes: list] {
+    let chosen = (
+        hint-lines $boxes
+        | ^wl-kbptr --only-print --output $name -o modes=floating -o mode_floating.source=stdin
+        | complete | get stdout | lines | first 1
+        | parse --regex '^(?<w>\d+)x(?<h>\d+)\+(?<x>-?\d+)\+(?<y>-?\d+) '
+    )
+    if ($chosen | is-empty) { return null }
+    let c = $chosen.0
+    let cx = ($c.x | into int) + ($c.w | into int) / 2
+    let cy = ($c.y | into int) + ($c.h | into int) / 2
+    $boxes | sort-by {|b| ($b.x + $b.w / 2 - $cx) ** 2 + ($b.y + $b.h / 2 - $cy) ** 2 } | first
+}
+
 # Opens the find bar on an output, with or without hints for several
-# matches; the bar's pid, or null if no bar answers. The bar stays loaded
-# between finds: wl-find-bar.service's where there is one, or else the one the
+# matches. A non-empty `query` is typed in, and submitted once the screen is
+# read; `copy` has Enter copy the match rather than click it. The bar's pid, or
+# null if no bar answers. The bar stays loaded between finds: wl-find-bar.service's where there is one, or else the one the
 # first find starts here. One not running yet is started, and waited for while
 # it loads. It takes finds on a socket named for its directory (wl-find.qml), so
 # a service of another build (`nix run` beside an installed wl-find) starts fine
 # and never answers: past ANSWER_WAIT attempts this build starts a bar of its
 # own. --no-duplicate leaves one of this build that is still loading alone.
-def open-bar [screen: string, hints: bool, lines: string, result: string] {
+def open-bar [screen: string, hints: bool, lines: string, result: string, query: string, copy: bool] {
     let socket = $"($env.XDG_RUNTIME_DIR)/wl-find-($env.WL_FIND_QML | path dirname | path basename).sock"
-    let line = [$screen $hints $lines $result] | str join "\t"
+    # The query as JSON, the one field that may hold a tab or a newline.
+    let line = [$screen $hints $lines $result ($query | to json --raw) $copy] | str join "\t"
     mut own_at = $ANSWER_WAIT
     for attempt in 0..<150 {
         let sent = ^wl-find-helper send $socket $line | complete

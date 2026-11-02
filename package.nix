@@ -33,6 +33,7 @@
   imagemagick_light,
   tesseract5,
   wl-kbptr,
+  wl-clipboard,
   opencv,
   colors ? { },
   font ? "monospace",
@@ -159,6 +160,7 @@ let
         imagemagick_light # the dark-on-light pass before tesseract
         tesseract
         wl-kbptr'
+        wl-clipboard # Ctrl+Y
       ])
     ];
   } (builtins.readFile ./wl-find.nu);
