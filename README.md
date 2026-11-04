@@ -89,13 +89,48 @@ wl-find -q 'TODO|FIXME' -y   # ...or to copy
 `node test/presets.js` checks the presets against Neovim, line by line (it
 needs nvim too).
 
+`test/ocr-bench.js` measures how well the screen is read: it renders three
+made-up screens in headless Chromium, at scale 1 and 2, has `wl-find read`
+read them, and counts the words and URLs read right:
+
+```sh
+nix shell .#default nixpkgs#chromium -c node test/ocr-bench.js
+```
+
 ## How it works
 
 The text comes from OCR. When you press the key, grim captures the output
 and tesseract reads it in twelve strips at once. Before tesseract, ImageMagick
-makes every region dark text on a light ground. The bar shows matches from the
-strips already read, so the first ones appear about half a second after the
-key press.
+enlarges each strip, 1.5 times on a scale-2 output and 1.75 on a scale-1 one,
+and makes every region dark text on a light ground. The bar shows matches from
+the strips already read, so the first ones appear about half a second after
+the key press.
+
+tesseract has a few habits with the monospaced fonts of terminals and editors,
+which wl-find undoes from the boxes of the characters it reads:
+
+- it reads a capital O as a zero, so `NixOS` comes out `Nix0S`. A programming
+  font puts a dot or a slash in its zero, so a "0" before a letter with an
+  empty middle is taken back for an O;
+- it reads some letters twice, as two characters it confuses: `macO0S`,
+  `1limit`. Of two such characters less than a character apart, the one it is
+  surer of stays;
+- it drops underscores, and `nixos_2411_released` comes out as three words.
+  Where the blank between two words has a stroke along its bottom, they are
+  joined with one.
+
+In any font, a word split at a "/" with no space there, as `https:` and
+`//example.com` are at times, is put back together.
+
+To see what wl-find reads off a screen, take a picture of it and read that:
+
+```sh
+grim -t ppm shot.ppm
+wl-find read shot.ppm --scale 2   # your output's scale
+```
+
+It prints the text a line of the screen to a line, as the bar searches it, or
+with `--json` the words and their boxes, as the bar gets them.
 
 The bar is a [Quickshell](https://quickshell.org) config that stays loaded
 between finds. It is opened through a socket, so it is up about 0.1 s after the
@@ -214,8 +249,11 @@ The package ships tesseract's `eng` model only, and a Quickshell built with
 just the features the bar uses, so its closure is about 840 MiB rather than
 2.4 GiB. Most of what is left is Qt.
 
-Text is read with tesseract's `eng` model. Small text on a scale-1 output is
-read less reliably than on a HiDPI one.
+Text is read with tesseract's `eng` model, so letters with accents may lose
+them. Small text on a scale-1 output is read less reliably than on a HiDPI
+one. Some characters look too much alike to be told apart everywhere: `l` and
+`I` in many interface fonts, and `1` and `l` in some monospaced ones, so
+`api/v1` may come out `api/vl`.
 
 Everything else comes with the package: Quickshell, grim, ImageMagick,
 tesseract, wl-kbptr, wl-clipboard, and `wl-find-helper`, a small C program that finds the
