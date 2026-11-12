@@ -8,8 +8,16 @@ outlined. Press Enter to act on them:
 - several get [wl-kbptr](https://github.com/moverest/wl-kbptr) hints, so you
   pick one by its letters.
 
-Ctrl+Enter does the same with a right click, and Ctrl+Y copies the text of the
-match to the clipboard instead of clicking it (with hints, the one you pick).
+Or pick one in the bar: Tab outlines the next match brighter than the rest,
+Shift+Tab the one before, and Enter then clicks that one alone.
+
+Ctrl+Enter does the same with a right click, Ctrl+Y copies the text of the
+match to the clipboard instead of clicking it (with hints, the one you pick),
+and Ctrl+O opens it with `xdg-open`: a URL in your browser, a file in the app
+for its type. A path from your home, as `~/notes.md`, opens the file it names.
+
+Ctrl+R reads the screen again, and keeps what you typed: for when it changed
+after the bar came up, as a page that was still loading.
 
 Esc, a click elsewhere, or Enter on an empty bar closes it. Ctrl+H shows or
 hides a cheat sheet of the patterns.
@@ -106,9 +114,25 @@ the reader's own parts (`ocr/test.cc`) as it builds the reader.
 nix shell .#default.ocr -c node test/ocr.js
 ```
 
+## Every output
+
+`wl-find --all-outputs` (`-a`) searches every output at once, with the bar on
+the focused one. All are captured at once, and read one after another, the
+focused one first, so its matches come as soon as with one output.
+
+```lua
+-- Hyprland, hyprland.lua
+hl.bind("SUPER + SHIFT + slash", hl.dsp.exec_cmd("wl-find --all-outputs"))
+```
+
+Tab goes through the matches an output at a time. Hints show on one output
+only, so when the matches are on several, Enter asks you to pick one with Tab,
+or to type more until they are on one.
+
 ## How it works
 
-The text comes from OCR. When you press the key, grim captures the output and
+The text comes from OCR. When you press the key, grim captures the output (each
+of them, with [`--all-outputs`](#every-output)) and
 `wl-find-ocr` reads it with two small neural models, run by ONNX Runtime: one
 finds the lines of text on the screen, the other reads each line off the
 screen's own pixels. Every core reads at once. A line is cut into pieces of a
@@ -209,7 +233,7 @@ The portal's restore token is kept in `~/.local/state/wl-find`.
 
 wl-kbptr needs the virtual pointer too, so COSMIC gets no hints to click with.
 If you press Enter while there are several matches, the bar stays open and asks
-you to type more until one is left. Copying (Ctrl+Y, `--copy`) uses wl-kbptr's
+you to pick one with Tab, or to type more until one is left. Copying (Ctrl+Y, `--copy`) uses wl-kbptr's
 `--only-print`, which moves no pointer, so it does get hints.
 
 ## Restyle
@@ -268,7 +292,9 @@ may come out `api/vl`.
 
 Everything else comes with the package: Quickshell, grim, wl-kbptr,
 wl-clipboard, `wl-find-ocr`, which reads the screen, and `wl-find-helper`, a
-small C program that finds the focused output and clicks.
+small C program that finds the outputs and clicks. Ctrl+O is the exception:
+it runs the `xdg-open` of your session, which every desktop has. The one
+xdg-utils ships would add some 200 MiB to the closure.
 
 ## Languages
 

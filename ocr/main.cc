@@ -7,6 +7,11 @@
 // pixels: an empty list as soon as the image is in, then the lines as they
 // are read, a few at a time.
 //
+// With --after FILE it reads nothing until FILE is made, its image and
+// recogniser in already: so wl-find reads one output after another, each
+// ready to start the moment the last is done. Two read at once take as long
+// as one after the other, as each has its threads spin on every core.
+//
 // A detector finds the boxes of text on the screen at its logical size. Each
 // box is a line, cut into pieces of one length, and a recogniser reads the
 // pieces off the screen's own pixels, on every core at once (ocr.hh has what
@@ -69,12 +74,13 @@ struct Options {
     std::string image;
     int threads = 0;
     bool timing = false;
+    std::string after;
 };
 
 [[noreturn]] void usage(const char* problem) {
     std::fprintf(stderr,
         "wl-find-ocr: %s\n"
-        "usage: wl-find-ocr [--scale N] [--det MODEL] [--rec MODEL] [--threads N] [--timing] [IMAGE.ppm]\n",
+        "usage: wl-find-ocr [--scale N] [--det MODEL] [--rec MODEL] [--threads N] [--after FILE] [--timing] [IMAGE.ppm]\n",
         problem);
     std::exit(2);
 }
@@ -91,6 +97,7 @@ Options parse(int argc, char** argv) {
         else if (arg == "--det") options.detector = value();
         else if (arg == "--rec") options.recogniser = value();
         else if (arg == "--threads") options.threads = std::atoi(value());
+        else if (arg == "--after") options.after = value();
         else if (arg == "--timing") options.timing = true;
         else if (!arg.empty() && arg[0] == '-' && arg != "-") usage(("no such option: " + arg).c_str());
         else options.image = arg;
@@ -337,18 +344,27 @@ int main(int argc, char** argv) {
             processor.slow.clear();
         }
 
-        // The models load while the screen is captured.
+        // The models load while the screen is captured. With --after, the
+        // detector loads only once the wait is over: its threads spin for a
+        // while after it is loaded, half a second of every fast core, and
+        // that would come out of the reading this one waits for.
         Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "wl-find-ocr");
         std::unique_ptr<Model> detector, recogniser;
         std::vector<std::string> alphabet;
         std::exception_ptr no_detector, no_recogniser;
-        std::thread load_detector([&] {
-            try {
-                detector = std::make_unique<Model>(env, options.detector, processor.fast());
-            } catch (...) {
-                no_detector = std::current_exception();
-            }
-        });
+        bool waits = !options.after.empty();
+        auto load_detector = [&] {
+            detector = std::make_unique<Model>(env, options.detector, processor.fast());
+        };
+        std::thread loading_detector;
+        if (!waits)
+            loading_detector = std::thread([&] {
+                try {
+                    load_detector();
+                } catch (...) {
+                    no_detector = std::current_exception();
+                }
+            });
         std::thread load_recogniser([&] {
             try {
                 recogniser = std::make_unique<Model>(env, options.recogniser, 1);
@@ -376,12 +392,19 @@ int main(int argc, char** argv) {
         timing("image read");
         // The screen is captured: the find bar may dim it.
         if (!unread) write_line("[]");
-        load_detector.join();
+        if (loading_detector.joinable()) loading_detector.join();
         load_recogniser.join();
         if (unread) std::rethrow_exception(unread);
         if (no_detector) std::rethrow_exception(no_detector);
         if (no_recogniser) std::rethrow_exception(no_recogniser);
-        timing("models loaded");
+        timing(waits ? "recogniser loaded" : "models loaded");
+        if (waits) {
+            while (access(options.after.c_str(), F_OK) != 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            timing("waited");
+            load_detector();
+            timing("detector loaded");
+        }
 
         std::vector<Box> boxes = detect(*detector, image, options.scale, processor.fast());
         detector.reset();

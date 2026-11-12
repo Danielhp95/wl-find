@@ -7,6 +7,9 @@
 //     pointer ("pointer"), which wl-kbptr's hints need too. With no NAME, the
 //     output a new layer surface goes on: the focused one.
 //
+//   wl-find-helper outputs
+//     Prints every output, a line of JSON each, as `output` prints one.
+//
 //   wl-find-helper click NAME X Y [left|right]
 //     Clicks a button, the left one by default, at (X, Y), in logical pixels
 //     within output NAME:
@@ -657,11 +660,13 @@ static int send_line(const char *path, const char *line) {
 
 int main(int argc, char **argv) {
     bool output = argc >= 2 && argc <= 3 && strcmp(argv[1], "output") == 0;
+    bool outputs = argc == 2 && strcmp(argv[1], "outputs") == 0;
     bool click = (argc == 5 || argc == 6) && strcmp(argv[1], "click") == 0;
     bool send = argc == 4 && strcmp(argv[1], "send") == 0;
     bool hide = argc >= 4 && strcmp(argv[1], "hide-cursor") == 0;
-    if (!output && !click && !send && !hide) {
+    if (!output && !outputs && !click && !send && !hide) {
         fprintf(stderr, "usage: wl-find-helper output [NAME]\n"
+                        "       wl-find-helper outputs\n"
                         "       wl-find-helper click NAME X Y [left|right]\n"
                         "       wl-find-helper hide-cursor NAME COMMAND...\n"
                         "       wl-find-helper send SOCKET LINE\n");
@@ -669,6 +674,11 @@ int main(int argc, char **argv) {
     }
     if (send) return send_line(argv[2], argv[3]);
     connect_wayland();
+    if (outputs) {
+        for (struct output *o = wl.outputs; o; o = o->next)
+            if (o->name && o->width > 0 && o->height > 0) print_output(o);
+        return 0;
+    }
     struct output *out = argc >= 3 ? output_named(argv[2]) : focused_output();
     if (!out) die("no such output");
     if (output) {

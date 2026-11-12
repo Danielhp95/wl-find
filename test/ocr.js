@@ -5,7 +5,7 @@
 //   node test/ocr.js            # wl-find-ocr on PATH, or WL_FIND_OCR
 //   node test/ocr.js --render   # the fixture again, with chromium: prints the
 //                               # words and their boxes, to paste in below
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -65,12 +65,47 @@ function render() {
     for (const words of JSON.parse(unescape(title[1]))) console.log(`    ${JSON.stringify(words).replace(/\],\[/g, "], [").replace(/","?/g, m => m === '",' ? '", ' : m).replace(/,(\d)/g, ", $1")},`);
 }
 
-function test() {
+// The lines of text in wl-find-ocr's output, in order of their text.
+const texts = stdout => stdout.split("\n").filter(Boolean).flatMap(l => JSON.parse(l))
+    .map(words => words.map(w => w.text).join(" ")).sort();
+
+// --after FILE, as wl-find reads the outputs after the first: "[]" comes out
+// as soon as the image is in, then nothing until FILE is made, and then the
+// same lines as without it.
+async function waits(command, image, want) {
+    const go = path.join(path.dirname(image), "go");
+    const child = spawn(command, ["--scale", String(scale), "--after", go, image]);
+    let out = "", err = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", d => out += d);
+    child.stderr.on("data", d => err += d);
+    const closed = new Promise(resolve => child.on("close", resolve));
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    for (let t = 0; out === "" && child.exitCode === null && t < 200; t++) await sleep(50);
+    if (out === "") {
+        child.kill();
+        return [`with --after, nothing came out: ${err.trim()}`];
+    }
+    if (out !== "[]\n") {
+        child.kill();
+        return [`with --after, ${JSON.stringify(out.slice(0, 60))} came out before the file was made, not []`];
+    }
+    await sleep(500);
+    if (out !== "[]\n") {
+        child.kill();
+        return ["with --after, it read before the file was made"];
+    }
+    fs.writeFileSync(go, "");
+    const status = await closed;
+    if (status !== 0) return [`with --after, it failed (${status})`];
+    return JSON.stringify(texts(out)) === JSON.stringify(want) ? [] : ["with --after, it read other lines than without"];
+}
+
+async function test() {
     const command = process.env.WL_FIND_OCR || "wl-find-ocr";
     const image = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ocr-test-")), "fixture.ppm");
     fs.writeFileSync(image, zlib.gunzipSync(fs.readFileSync(fixture)));
     const run = spawnSync(command, ["--scale", String(scale), image], { encoding: "utf8", maxBuffer: 1 << 26 });
-    fs.rmSync(path.dirname(image), { recursive: true });
     const failures = [];
     if (run.error) failures.push(`${command} did not run: ${run.error.message}`);
     else if (run.status !== 0) failures.push(`${command} failed (${run.status}): ${run.stderr}`);
@@ -107,6 +142,8 @@ function test() {
                 failures.push(`misplaced: "${word}" is at ${x},${y} ${w}x${h}, read at ${g.x},${g.y} ${g.w}x${g.h}`);
         }
     }
+    if (run.status === 0) failures.push(...await waits(command, image, texts(run.stdout)));
+    fs.rmSync(path.dirname(image), { recursive: true });
     for (const f of failures) console.error(f);
     console.error(failures.length === 0 ? `ok: ${lines.length} lines read right` : `${failures.length} failures`);
     process.exit(failures.length === 0 ? 0 : 1);

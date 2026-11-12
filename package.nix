@@ -23,6 +23,7 @@
   libportal,
   libei,
   coreutils,
+  runtimeShellPackage,
   quickshell,
   cpptrace,
   libdrm,
@@ -210,6 +211,7 @@ let
       ":"
       (lib.makeBinPath [
         coreutils
+        runtimeShellPackage # Ctrl+O, to leave xdg-open running
         helper
         quickshell'
         grim

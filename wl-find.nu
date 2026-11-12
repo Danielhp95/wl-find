@@ -4,10 +4,13 @@
 # wl-find-ocr (ocr/) reads the screen meanwhile. On Enter a lone match is
 # clicked at once; several get wl-kbptr's hints, where the compositor has the
 # virtual pointer they click with (not COSMIC: there the bar waits for a query
-# with one match). Ctrl+Enter makes that a right click, and Ctrl+Y copies the
-# text of the match instead, through wl-copy, with the same hints to pick one
-# of several (they need no pointer to click with, so COSMIC has them too).
-# wl-find-helper finds the output and clicks, the same way on any compositor.
+# with one match). Tab picks one of several in the bar, and Enter acts on that
+# one alone. Ctrl+Enter makes that a right click, Ctrl+Y copies the text of the
+# match instead, through wl-copy, and Ctrl+O opens it with xdg-open, with the
+# same hints to pick one of several (they need no pointer to click with, so
+# COSMIC has them too). Ctrl+R has the screen read again, the query kept.
+# --all-outputs searches every output, the bar on the focused one.
+# wl-find-helper finds the outputs and clicks, the same way on any compositor.
 # The query is a Neovim regular expression under \v (vim-regex.js). --query
 # opens the bar with one already typed, and --type with a preset, as kitty's
 # `kitten hints --type` has: all the URLs, or all the file paths, on screen.
@@ -35,6 +38,7 @@ const ANSWER_WAIT = 25
 # regular expression, under \v.
 def main [
     --output: string # the output to search, by name; by default the focused one
+    --all-outputs (-a) # search every output, with the bar on the focused one (or --output's)
     --query (-q): string # a pattern to find at once, as if typed and Enter pressed (edit it first to take that back)
     --type (-t): string # --query with a preset pattern: url or path (not both)
     --copy (-y) # copy the text of the match to the clipboard instead of clicking it, as Ctrl+Y does
@@ -50,57 +54,107 @@ def main [
     }
     let pattern = if $type != null { $presets | get $type } else { $query | default "" }
     let output = ^wl-find-helper output ...([$output] | compact) | from json
+    # The bar's output first: it is read first, and the others after it.
+    let outputs = if $all_outputs {
+        [$output] ++ (^wl-find-helper outputs | lines | each { from json } | where name != $output.name | sort-by x y)
+    } else {
+        [$output]
+    }
     let dir = mktemp -d -p $env.XDG_RUNTIME_DIR wl-find.XXXXXX
-    let lines = $"($dir)/lines"
     let result = $"($dir)/result"
-    # The find bar reads the lines from this pipe, a few at a time. The first
-    # line, empty, is sent once the screen is captured, and only then does the
-    # bar dim the screen, so the dim stays out of the picture. A failed
-    # capture closes the pipe unwritten, and the bar closes.
-    ^mkfifo $lines
+    # The bar asks for the screen to be read again by making this file.
+    let reread = $"($dir)/reread"
+    let socket = bar-socket
+    mut reads = make-reads $dir 0 $outputs
     # The bar first: the reading takes every core there is.
-    let bar = open-bar $output.name $output.pointer $lines $result $pattern $copy
+    let bar = open-bar $socket {
+        kind: open
+        screen: $output.name
+        hints: $output.pointer
+        reads: ($reads | select output lines)
+        result: $result
+        reread: $reread
+        query: $pattern
+        copy: $copy
+    }
     if $bar == null {
         rm -r $dir
         print -e "wl-find: the find bar did not start"
         exit 1
     }
-    # grim's picture goes straight to wl-find-ocr, which loads its models
-    # while the screen is captured, and what that reads straight down the pipe.
-    # The pointer is hidden for the picture, or it may lie across the very
-    # word sought.
-    job spawn {
-        try { ^wl-find-helper hide-cursor $output.name grim -o $output.name -t ppm - | ^wl-find-ocr --scale $output.scale out> $lines }
-    }
+    start-reads $reads
     # The bar leaves its answer in $result when it closes; a bar that crashed
-    # leaves none.
+    # leaves none. Ctrl+R has the bar take its dim off the screen and ask
+    # for it to be read again: the reading is stopped, wherever it was, and a
+    # new one goes down new pipes, which the bar is told of.
+    mut generation = 0
     while (not ($result | path exists)) and ($"/proc/($bar)" | path exists) {
+        if ($reread | path exists) {
+            rm $reread
+            job list | each {|j| job kill $j.id } | ignore
+            $generation += 1
+            $reads = make-reads $dir $generation $outputs
+            let line = { kind: read, result: $result, reads: ($reads | select output lines) } | to json --raw
+            ^wl-find-helper send $socket $line | complete | ignore
+            start-reads $reads
+        }
         sleep 10ms
     }
     # Stop whatever still reads: the bar may have left before it was done.
     job list | each {|j| job kill $j.id } | ignore
-    # Logical pixels, relative to the output.
-    let answer = if ($result | path exists) { open --raw $result | from json } else { { boxes: [], right: false, copy: false } }
+    # Logical pixels, relative to the output each box names.
+    let answer = if ($result | path exists) { open --raw $result | from json } else { { boxes: [], action: click } }
     rm -r $dir
     let boxes = $answer.boxes
-    let button = if $answer.right { "right" } else { "left" }
+    if ($boxes | is-empty) { return }
 
-    match ($boxes | length) {
-        0 => { }
-        1 if $answer.copy => { copy-text $boxes.0.text }
-        1 => {
+    # The bar leaves several boxes only when they are on one output.
+    if $answer.action in [copy open] {
+        let picked = if ($boxes | length) == 1 { $boxes.0 } else { pick-box $boxes }
+        if $picked == null { return }
+        if $answer.action == copy { copy-text $picked.text } else { open-text $picked.text }
+    } else {
+        let button = if $answer.action == right { "right" } else { "left" }
+        if ($boxes | length) == 1 {
             let b = $boxes.0
-            ^wl-find-helper click $output.name ($b.x + $b.w / 2) ($b.y + $b.h / 2) $button
-        }
-        _ if $answer.copy => {
-            let picked = pick-box $output.name $boxes
-            if $picked != null { copy-text $picked.text }
-        }
-        _ => {
+            ^wl-find-helper click $b.output ($b.x + $b.w / 2) ($b.y + $b.h / 2) $button
+        } else {
             hint-lines $boxes
-            | wl-kbptr --output $output.name -o modes=floating,click -o mode_floating.source=stdin -o $"mode_click.button=($button)"
+            | wl-kbptr --output $boxes.0.output -o modes=floating,click -o mode_floating.source=stdin -o $"mode_click.button=($button)"
         }
     }
+}
+
+# A pipe for each output to send its lines down, as the bar takes them:
+# { output, scale, lines }, the pipe at `lines`. The bar reads the lines from
+# it a few at a time. The first line, empty, is sent once the output is
+# captured, and only then does the bar dim it, so the dim stays out of the
+# picture. A failed capture closes the pipe unwritten.
+def make-reads [dir: string, generation: int, outputs: list] {
+    $outputs | enumerate | each {|o|
+        let lines = $"($dir)/lines-($generation)-($o.index)"
+        ^mkfifo $lines
+        { output: $o.item.name, scale: $o.item.scale, lines: $lines }
+    }
+}
+
+# Reads each output down its pipe: grim's picture goes straight to
+# wl-find-ocr, which loads its models while the output is captured, and what
+# that reads straight down the pipe. All are captured at once, but read one
+# after another, the bar's first: wl-find-ocr's threads spin on every core, so
+# two read at once each take as long as both one after the other, nice or not.
+# Each after the first waits (--after) for the one before it to be done, its
+# picture and models in already. The pointer is hidden for each picture, or it
+# may lie across the very word sought.
+def start-reads [reads: list] {
+    $reads | enumerate | each {|r|
+        let read = $r.item
+        let after = if $r.index == 0 { [] } else { [--after $"(($reads | get ($r.index - 1)).lines).done"] }
+        job spawn {
+            try { ^wl-find-helper hide-cursor $read.output grim -o $read.output -t ppm - | ^wl-find-ocr --scale $read.scale ...$after out> $read.lines }
+            touch $"($read.lines).done"
+        }
+    } | ignore
 }
 
 # Prints the text wl-find reads off an image, a line of the screen to a line,
@@ -119,6 +173,15 @@ def "main read" [
     # A few lines of the screen to each line of output, as they were read.
     let lines = $read.stdout | lines | each { from json } | flatten | sort-by {|l| $l.0.y } {|l| $l.0.x }
     if $json { $lines | each { to json --raw } | str join "\n" } else { $lines | each { get text | str join " " } | str join "\n" }
+}
+
+# What Ctrl+O opens: the xdg-open of the session, as the one that comes with
+# xdg-utils would bring ~200 MiB with it. It runs in the background, as it
+# may wait for what it opens. A path from the home directory, as a shell
+# prints it (~/notes.md), is opened as the file it names.
+def open-text [text: string] {
+    let target = if $text == "~" or ($text | str starts-with "~/") { $text | path expand } else { $text }
+    ^bash -c 'xdg-open "$1" > /dev/null 2>&1 &' wl-find $target
 }
 
 # What the clipboard is given. wl-copy serves it from a process of its own that
@@ -142,11 +205,12 @@ def hint-lines [boxes: list] {
 # The box that wl-kbptr's hints pick, or null if none is: --only-print leaves
 # the pointer alone and prints the area chosen, "WxH+X+Y +X+Y b", the output's
 # place and the button, in the output's own pixels, as the targets are. The
-# nearest box to it is the one, whatever the rounding.
-def pick-box [name: string, boxes: list] {
+# nearest box to it is the one, whatever the rounding. The boxes are all on
+# one output.
+def pick-box [boxes: list] {
     let chosen = (
         hint-lines $boxes
-        | ^wl-kbptr --only-print --output $name -o modes=floating -o mode_floating.source=stdin
+        | ^wl-kbptr --only-print --output $boxes.0.output -o modes=floating -o mode_floating.source=stdin
         | complete | get stdout | lines | first 1
         | parse --regex '^(?<w>\d+)x(?<h>\d+)\+(?<x>-?\d+)\+(?<y>-?\d+) '
     )
@@ -157,19 +221,26 @@ def pick-box [name: string, boxes: list] {
     $boxes | sort-by {|b| ($b.x + $b.w / 2 - $cx) ** 2 + ($b.y + $b.h / 2 - $cy) ** 2 } | first
 }
 
-# Opens the find bar on an output, with or without hints for several
-# matches. A non-empty `query` is typed in, and submitted once the screen is
-# read; `copy` has Enter copy the match rather than click it. The bar's pid, or
-# null if no bar answers. The bar stays loaded between finds: wl-find-bar.service's where there is one, or else the one the
-# first find starts here. One not running yet is started, and waited for while
-# it loads. It takes finds on a socket named for its directory (wl-find.qml), so
-# a service of another build (`nix run` beside an installed wl-find) starts fine
-# and never answers: past ANSWER_WAIT attempts this build starts a bar of its
-# own. --no-duplicate leaves one of this build that is still loading alone.
-def open-bar [screen: string, hints: bool, lines: string, result: string, query: string, copy: bool] {
-    let socket = $"($env.XDG_RUNTIME_DIR)/wl-find-($env.WL_FIND_QML | path dirname | path basename).sock"
-    # The query as JSON, the one field that may hold a tab or a newline.
-    let line = [$screen $hints $lines $result ($query | to json --raw) $copy] | str join "\t"
+# The socket the find bar of this build takes finds on, named for its
+# directory (wl-find.qml).
+def bar-socket [] {
+    $"($env.XDG_RUNTIME_DIR)/wl-find-($env.WL_FIND_QML | path dirname | path basename).sock"
+}
+
+# Opens the find bar with `message`, a line of JSON: on output `screen`, with
+# or without `hints` for several matches, reading the outputs of `reads` down
+# their pipes, and leaving its answer in `result`. A non-empty `query` is
+# typed in, and submitted once the screen is read; `copy` has Enter copy the
+# match rather than click it. The bar's pid, or null if no bar answers. The
+# bar stays loaded between finds: wl-find-bar.service's where there is one,
+# or else the one the first find starts here. One not running yet is started,
+# and waited for while it loads. Its socket is named for its build
+# (bar-socket), so a service of another build (`nix run` beside an installed
+# wl-find) starts fine and never answers: past ANSWER_WAIT attempts this
+# build starts a bar of its own. --no-duplicate leaves one of this build that
+# is still loading alone.
+def open-bar [socket: string, message: record] {
+    let line = $message | to json --raw
     mut own_at = $ANSWER_WAIT
     for attempt in 0..<150 {
         let sent = ^wl-find-helper send $socket $line | complete
