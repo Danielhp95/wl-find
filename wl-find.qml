@@ -26,7 +26,7 @@ ShellRoot {
     property bool active: false
     property string resultPath: ""
     // The lines of words { text, x, y, w, h } wl-find.nu has read off the
-    // screen so far, in logical pixels. They come a strip at a time, after an
+    // screen so far, in logical pixels. They come a few at a time, after an
     // empty first batch that says the screen is captured: the dim shows only
     // then, so it stays out of the capture.
     property var lines: []
@@ -75,8 +75,8 @@ ShellRoot {
             && b.y < barRect.y + barRect.height && b.y + b.h > barRect.y;
     }
 
-    // Text as find() compares it: compatibility forms folded (the "ﬁ"
-    // tesseract reads off a ligature is "fi"), and curly quotes, primes and
+    // Text as find() compares it: compatibility forms folded (the "ﬁ" the
+    // recogniser reads off a ligature is "fi"), and curly quotes, primes and
     // long dashes made the plain ones a keyboard types.
     function fold(text) {
         return text.normalize("NFKC")

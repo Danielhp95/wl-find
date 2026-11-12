@@ -4,11 +4,14 @@
 {
   lib,
   stdenv,
+  fetchurl,
   writers,
   writeShellScriptBin,
   symlinkJoin,
   replaceVars,
   runCommandLocal,
+  removeReferencesTo,
+  patchelf,
   runtimeShell,
   meson,
   ninja,
@@ -30,13 +33,26 @@
   polkit,
   glib,
   grim,
-  imagemagick_light,
-  tesseract5,
+  onnxruntime,
   wl-kbptr,
   wl-clipboard,
   opencv,
   colors ? { },
   font ? "monospace",
+  # The two models wl-find-ocr reads with, as ONNX files: the one that finds
+  # the text on a screen, and the one that reads a line of it, which carries
+  # the list of its characters with it. PaddleOCR's (Apache 2.0), as RapidOCR
+  # publishes them: PP-OCRv6's smallest detector, and PP-OCRv5's recogniser
+  # for English and the accented letters of western Europe. Any other of
+  # RapidOCR's recognisers reads other scripts, slower or less surely.
+  detector ? fetchurl {
+    url = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_tiny.onnx";
+    hash = "sha256-9CwPvSlNlerBpVDhMbJ32sl0YsgCX6S2w87Bt4lL09U=";
+  },
+  recogniser ? fetchurl {
+    url = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/en_PP-OCRv5_rec_mobile.onnx";
+    hash = "sha256-w0Ya3Vm7QyPsupakkqt14G3aQkZ8nj0MGNtdHSGSS+g=";
+  },
 }:
 let
   # Only what the bar uses of Quickshell: the rest (PipeWire and through it
@@ -89,8 +105,48 @@ let
     '';
   });
 
-  # wl-find reads English only: the other languages are ~1 GiB.
-  tesseract = tesseract5.override { enableLanguages = [ "eng" ]; };
+  models = runCommandLocal "wl-find-models" { } ''
+    mkdir $out
+    ln -s ${detector} $out/det.onnx
+    ln -s ${recogniser} $out/rec.onnx
+  '';
+
+  # ONNX Runtime's own library and nothing else of it. nixpkgs builds it with
+  # the OpenVINO provider, a file beside the library that wl-find never
+  # loads: with it would come OpenVINO, 165 MiB. The library names its own
+  # directory, to look for such providers in, and that name goes too.
+  onnxruntime' =
+    runCommandLocal "onnxruntime-${onnxruntime.version}-lib"
+      { nativeBuildInputs = [ removeReferencesTo ]; }
+      ''
+        mkdir -p $out/lib
+        cp -P ${lib.getLib onnxruntime}/lib/libonnxruntime.so* $out/lib/
+        chmod u+w $out/lib/*
+        remove-references-to -t ${lib.getLib onnxruntime} $out/lib/libonnxruntime.so.*.*
+      '';
+
+  # Reads the text off a screenshot (ocr/), with the models above unless it
+  # is told others. Its own parts are tested as it is built.
+  ocr = stdenv.mkDerivation {
+    pname = "wl-find-ocr";
+    version = "0.1.0";
+    src = ./ocr;
+    strictDeps = true;
+    nativeBuildInputs = [
+      meson
+      ninja
+      pkg-config
+      patchelf
+    ];
+    buildInputs = [ onnxruntime ];
+    mesonFlags = [ (lib.mesonOption "models" "${models}") ];
+    doCheck = true;
+    # Built against all of ONNX Runtime, and run with its library alone.
+    postFixup = ''
+      patchelf --set-rpath "$(patchelf --print-rpath $out/bin/wl-find-ocr | sed "s|${lib.getLib onnxruntime}/lib|${onnxruntime'}/lib|")" $out/bin/wl-find-ocr
+    '';
+    disallowedReferences = [ (lib.getLib onnxruntime) ];
+  };
 
   qml = replaceVars ./wl-find.qml (
     {
@@ -157,8 +213,7 @@ let
         helper
         quickshell'
         grim
-        imagemagick_light # the dark-on-light pass before tesseract
-        tesseract
+        ocr
         wl-kbptr'
         wl-clipboard # Ctrl+Y
       ])
@@ -177,7 +232,7 @@ symlinkJoin {
     find
     findBar
   ];
-  passthru = { inherit bar helper; };
+  passthru = { inherit bar helper ocr; };
   meta = {
     description = "Ctrl+F for the whole screen on Wayland: type what to find, then click it";
     homepage = "https://github.com/Danielhp95/wl-find";

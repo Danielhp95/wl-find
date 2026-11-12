@@ -97,30 +97,42 @@ read them, and counts the words and URLs read right:
 nix shell .#default nixpkgs#chromium -c node test/ocr-bench.js
 ```
 
+`test/ocr.js` is the test of that reading: a small screen, kept as
+`test/ocr-fixture.ppm.gz`, whose every line must come out as written, each
+word where the browser drew it. `nix flake check` runs it, and the tests of
+the reader's own parts (`ocr/test.cc`) as it builds the reader.
+
+```sh
+nix shell .#default.ocr -c node test/ocr.js
+```
+
 ## How it works
 
-The text comes from OCR. When you press the key, grim captures the output
-and tesseract reads it in twelve strips at once. Before tesseract, ImageMagick
-enlarges each strip, 1.5 times on a scale-2 output and 1.75 on a scale-1 one,
-and makes every region dark text on a light ground. The bar shows matches from
-the strips already read, so the first ones appear about half a second after
-the key press.
+The text comes from OCR. When you press the key, grim captures the output and
+`wl-find-ocr` reads it with two small neural models, run by ONNX Runtime: one
+finds the lines of text on the screen, the other reads each line off the
+screen's own pixels. Every core reads at once. A line is cut into pieces of a
+few words, each read with a little of its neighbours and sewn back where the
+two readings agree, so that a long line does not keep the rest waiting; on a
+processor with fast and slow cores, the long pieces go to the fast ones. The
+bar shows matches from the lines already read. A 3840x2400 screen full of
+text is read in about 0.4 s on mains power, and in under a second on battery
+with the processor held back (a 24-core laptop).
 
-tesseract has a few habits with the monospaced fonts of terminals and editors,
-which wl-find undoes from the boxes of the characters it reads:
+A recogniser sees every line at one height, so it is unsure of what only size
+or a detail tells apart. wl-find settles those from the pixels of each
+letter:
 
-- it reads a capital O as a zero, so `NixOS` comes out `Nix0S`. A programming
-  font puts a dot or a slash in its zero, so a "0" before a letter with an
-  empty middle is taken back for an O;
-- it reads some letters twice, as two characters it confuses: `macO0S`,
-  `1limit`. Of two such characters less than a character apart, the one it is
-  surer of stays;
-- it drops underscores, and `nixos_2411_released` comes out as three words.
-  Where the blank between two words has a stroke along its bottom, they are
-  joined with one.
-
-In any font, a word split at a "/" with no space there, as `https:` and
-`//example.com` are at times, is put back together.
+- a letter that is its own capital at another size (c, o, s, u, v, w, x, z):
+  as tall as the line's capitals it is the capital, and as tall as its small
+  letters the small one;
+- in the monospaced fonts of terminals and editors, a capital O and a zero: a
+  programming font puts a dot or a slash in its zero, so `Nix0S` is `NixOS`;
+- there too, a backtick, which is read as an apostrophe or not at all, a
+  `|`, which is read as an I, and underscores side by side, which are read
+  as one: `__init__` is as many as the cells its strokes lie under;
+- a mark read where there is no ink, which is a space, and letters a whole
+  cell apart with no space read between them.
 
 To see what wl-find reads off a screen, take a picture of it and read that:
 
@@ -245,16 +257,37 @@ wl-find uses no compositor's IPC, only these Wayland protocols:
 
 GNOME has no layer-shell, so wl-find cannot run there.
 
-The package ships tesseract's `eng` model only, and a Quickshell built with
-just the features the bar uses, so its closure is about 840 MiB rather than
-2.4 GiB. Most of what is left is Qt.
+The package ships the two models (9 MiB), ONNX Runtime's library alone, and a
+Quickshell built with just the features the bar uses, so its closure is about
+940 MiB. Most of that is Qt.
 
-Text is read with tesseract's `eng` model, so letters with accents may lose
-them. Small text on a scale-1 output is read less reliably than on a HiDPI
-one. Some characters look too much alike to be told apart everywhere: `l` and
-`I` in many interface fonts, and `1` and `l` in some monospaced ones, so
-`api/v1` may come out `api/vl`.
+Small text on a scale-1 output is read less reliably than on a HiDPI one.
+Some characters look too much alike to be told apart everywhere: `l` and `I`
+in many interface fonts, and `1` and `l` in some monospaced ones, so `api/v1`
+may come out `api/vl`.
 
-Everything else comes with the package: Quickshell, grim, ImageMagick,
-tesseract, wl-kbptr, wl-clipboard, and `wl-find-helper`, a small C program that finds the
-focused output and clicks.
+Everything else comes with the package: Quickshell, grim, wl-kbptr,
+wl-clipboard, `wl-find-ocr`, which reads the screen, and `wl-find-helper`, a
+small C program that finds the focused output and clicks.
+
+## Languages
+
+The models are PaddleOCR's (Apache 2.0), as
+[RapidOCR](https://github.com/RapidAI/RapidOCR) publishes them for ONNX
+Runtime: PP-OCRv6's smallest detector, and PP-OCRv5's recogniser for English,
+which also reads the accented letters of western Europe. Other scripts need
+another recogniser, which is a package argument. PP-OCRv6's own reads some
+fifty languages, Chinese and Japanese among them; on English it does as well
+on the benchmark above, and takes a tenth longer:
+
+```nix
+programs.wl-find.package = inputs.wl-find.packages.${system}.default.override {
+  recogniser = pkgs.fetchurl {
+    url = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx";
+    hash = "sha256-bzJyRrUDiPPBdq4wS9lXZ+ptwMmukhU++MviELPBSIQ=";
+  };
+};
+```
+
+Any recogniser RapidOCR publishes as ONNX will do: it carries the list of its
+characters with it. `detector` is the other model, the same way.

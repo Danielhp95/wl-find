@@ -28,6 +28,19 @@
           nu -n -c 'if not (nu-check ${./wl-find.nu}) { nu-check --debug ${./wl-find.nu} }'
           touch $out
         '';
+        # wl-find-ocr reads a small screen right, every word in its place.
+        ocr =
+          pkgs.runCommand "wl-find-ocr-check"
+            {
+              nativeBuildInputs = [
+                pkgs.nodejs
+                self.packages.${pkgs.stdenv.hostPlatform.system}.default.ocr
+              ];
+            }
+            ''
+              HOME=$TMPDIR node ${./.}/test/ocr.js
+              touch $out
+            '';
         # The bar's regular expressions, and wl-find's url and path presets,
         # against Neovim's own.
         regex =
